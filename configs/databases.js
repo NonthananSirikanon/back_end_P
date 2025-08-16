@@ -1,4 +1,5 @@
 const mongoose = require('mongoose')
+const { Sequelize } = require('sequelize')
 const config = require('../configs/app')
 
 const databases = {
@@ -23,10 +24,38 @@ const databases = {
     return connection;
   },
 
-  postgresql(){},
+  postgresql(){
+    const sequelize = new Sequelize(
+      config.database.name,
+      config.database.username,
+      config.database.password,
+      {
+        host: config.database.host,
+        port: config.database.port,
+        dialect: config.database.dialect,
+        logging: false,
+        pool: {
+          max: 5,
+          min: 0,
+          acquire: 30000,
+          idle: 10000
+        }
+      }
+    );
+
+    sequelize.authenticate()
+      .then(() => {
+        console.log('PostgreSQL connected successfully');
+      })
+      .catch(err => {
+        console.error('PostgreSQL connection error:', err);
+      });
+
+    return sequelize;
+  },
 
   mssql(){}
 
 }
 
-module.exports = databases.mongoDB()
+module.exports = databases.postgresql()
