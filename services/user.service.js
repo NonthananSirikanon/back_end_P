@@ -1,196 +1,131 @@
-const { User } = require('../models')
-const jwt = require('jsonwebtoken')
-const config = require('../configs/app')
-const { Op } = require('sequelize')
+const User = require('../models/User'),
+  config = require('../configs/app'),
+  jwt = require('jsonwebtoken'),
+  { ErrorBadRequest, ErrorNotFound, ErrorUnauthorized } = require('../configs/errorMethods')
 
 const methods = {
-  // Find all users with pagination
-  async find(req) {
-    try {
-      const page = parseInt(req.query.page) || 1
-      const limit = parseInt(req.query.limit) || config.pageLimit
-      const offset = (page - 1) * limit
+  scopeSearch(req) {
+    $or = []
+    if (req.query.username) $or.push({ username: { $regex: req.query.username } })
+    if (req.query.email) $or.push({ email: { $regex: req.query.email } })
+    if (req.query.age) $or.push({ age: +req.query.age })
+    const query = $or.length > 0 ? { $or } : {}
+    const sort = { createdAt: -1 }
+    if (req.query.orderByField && req.query.orderBy)
+      sort[req.query.orderByField] = req.query.orderBy.toLowerCase() == 'desc' ? -1 : 1
+    return { query: query, sort: sort }
+  },
 
-      const { count, rows } = await User.findAndCountAll({
-        attributes: ['id', 'username', 'email', 'age', 'birthday', 'created_at', 'updated_at'],
-        limit,
-        offset,
-        order: [['created_at', 'DESC']]
-      })
+  find(req) {
+    const limit = +(req.query.size || config.pageLimit)
+    const offset = +(limit * ((req.query.page || 1) - 1))
+    const _q = methods.scopeSearch(req)
 
-      return {
-        data: rows.map(user => user.toJSON()),
-        pagination: {
-          page,
-          limit,
-          totalItems: count,
-          totalPages: Math.ceil(count / limit)
+    return new Promise(async (resolve, reject) => {
+      try {
+        Promise.all([User.find(_q.query).sort(_q.sort).limit(limit).skip(offset), User.countDocuments(_q.query)])
+          .then((result) => {
+            const rows = result[0],
+              count = result[1]
+            resolve({
+              total: count,
+              lastPage: Math.ceil(count / limit),
+              currPage: +req.query.page || 1,
+              rows: rows,
+            })
+          })
+          .catch((error) => {
+            reject(error)
+          })
+      } catch (error) {
+        reject(error)
+      }
+    })
+  },
+
+  findById(id) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const obj = await User.findById(id)
+        if (!obj) reject(ErrorNotFound('id: not found'))
+        resolve(obj.toJSON())
+      } catch (error) {
+        reject(ErrorNotFound('id: not found'))
+      }
+    })
+  },
+
+  insert(data) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const obj = new User(data)
+        const inserted = await obj.save()
+        resolve(inserted)
+      } catch (error) {
+        reject(ErrorBadRequest(error.message))
+      }
+    })
+  },
+
+  update(id, data) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const obj = await User.findById(id)
+        if (!obj) reject(ErrorNotFound('id: not found'))
+        await User.updateOne({ _id: id }, data)
+        resolve(Object.assign(obj, data))
+      } catch (error) {
+        reject(error)
+      }
+    })
+  },
+
+  delete(id) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const obj = await User.findById(id)
+        if (!obj) reject(ErrorNotFound('id: not found'))
+        await User.deleteOne({ _id: id })
+        resolve()
+      } catch (error) {
+        reject(error)
+      }
+    })
+  },
+
+  login(data) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const obj = await User.findOne({ username: data.username })
+        if (!obj) {
+          reject(ErrorUnauthorized('username not found'))
         }
+
+        if (!obj.validPassword(data.password)) {
+          reject(ErrorUnauthorized('password is invalid.'))
+        }
+
+        resolve({ accessToken: obj.generateJWT(obj), userData: obj })
+      } catch (error) {
+        reject(error)
       }
-    } catch (error) {
-      throw error
-    }
+    })
   },
 
-  // Find user by ID
-  async findById(id) {
-    try {
-      const user = await User.findByPk(id, {
-        attributes: ['id', 'username', 'email', 'age', 'birthday', 'created_at', 'updated_at']
-      })
-      
-      if (!user) {
-        throw new Error('User not found')
+  refreshToken(accessToken) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const decoded = jwt.decode(accessToken)
+        const obj = await User.findOne({ username: decoded.username })
+        if (!obj) {
+          reject(ErrorUnauthorized('username not found'))
+        }
+        resolve({ accessToken: obj.generateJWT(obj), userData: obj })
+      } catch (error) {
+        reject(error)
       }
-
-      return user.toJSON()
-    } catch (error) {
-      throw error
-    }
+    })
   },
-
-  // Insert new user
-  async insert(data) {
-    try {
-      const { username, password, email, age, birthday } = data
-      
-      if (!username || !password) {
-        throw new Error('Username and password are required')
-      }
-
-      const user = await User.create({
-        username,
-        password,
-        email,
-        age,
-        birthday
-      })
-      
-      const token = user.generateJWT()
-
-      return {
-        user: user.toJSON(),
-        token
-      }
-    } catch (error) {
-      if (error.name === 'SequelizeUniqueConstraintError') {
-        throw new Error('Username already exists')
-      }
-      if (error.name === 'SequelizeValidationError') {
-        throw new Error(error.errors.map(e => e.message).join(', '))
-      }
-      throw error
-    }
-  },
-
-  // Update user
-  async update(id, data) {
-    try {
-      const { username, password, email, age, birthday } = data
-      
-      const user = await User.findByPk(id)
-      
-      if (!user) {
-        throw new Error('User not found')
-      }
-
-      const updateData = {}
-      if (username !== undefined) updateData.username = username
-      if (password !== undefined) updateData.password = password
-      if (email !== undefined) updateData.email = email
-      if (age !== undefined) updateData.age = age
-      if (birthday !== undefined) updateData.birthday = birthday
-
-      if (Object.keys(updateData).length === 0) {
-        throw new Error('No data to update')
-      }
-
-      await user.update(updateData)
-      await user.reload()
-
-      return user.toJSON()
-    } catch (error) {
-      if (error.name === 'SequelizeUniqueConstraintError') {
-        throw new Error('Username already exists')
-      }
-      if (error.name === 'SequelizeValidationError') {
-        throw new Error(error.errors.map(e => e.message).join(', '))
-      }
-      throw error
-    }
-  },
-
-  // Delete user
-  async delete(id) {
-    try {
-      const user = await User.findByPk(id)
-      
-      if (!user) {
-        throw new Error('User not found')
-      }
-
-      await user.destroy()
-      return { message: 'User deleted successfully' }
-    } catch (error) {
-      throw error
-    }
-  },
-
-  // Login
-  async login(data) {
-    try {
-      const { username, password } = data
-      
-      if (!username || !password) {
-        throw new Error('Username and password are required')
-      }
-
-      const user = await User.findOne({
-        where: { username }
-      })
-      
-      if (!user) {
-        throw new Error('Invalid username or password')
-      }
-      
-      if (!user.validPassword(password)) {
-        throw new Error('Invalid username or password')
-      }
-
-      const token = user.generateJWT()
-
-      return {
-        user: user.toJSON(),
-        token
-      }
-    } catch (error) {
-      throw error
-    }
-  },
-
-  // Refresh token
-  async refreshToken(accessToken) {
-    try {
-      const decoded = jwt.verify(accessToken, config.secret, { ignoreExpiration: true })
-      
-      const user = await User.findByPk(decoded.id, {
-        attributes: ['id', 'username', 'email', 'age', 'birthday', 'created_at', 'updated_at']
-      })
-      
-      if (!user) {
-        throw new Error('User not found')
-      }
-
-      const newToken = user.generateJWT()
-
-      return {
-        user: user.toJSON(),
-        token: newToken
-      }
-    } catch (error) {
-      throw new Error('Invalid token')
-    }
-  }
 }
 
 module.exports = { ...methods }
